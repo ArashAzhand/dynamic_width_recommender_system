@@ -72,14 +72,8 @@ All models evaluated under a strict **80/10/10 leak-free per-user split**, full-
 │   ├── models.py              # PANDARecommender & PredictionAlignmentLayer
 │   ├── train.py               # BPRLoss, NegativeSampler, Early-stopping BaseTrainer
 │   └── evaluator.py           # Full-catalogue RecBole-standard ranking evaluator
-├── Report/                    # Academic report & LaTeX paper
-│   ├── main.tex               # Master LaTeX paper
-│   ├── main.pdf               # Compiled 7-page PDF report
-│   ├── sync_report.py         # Auto-sync pipeline for tables, figures, and LaTeX PDF
-│   ├── tables/                # Modular LaTeX results table
-│   └── figures/               # High-resolution publication plots
 ├── main.py                    # Unified CLI benchmark runner
-├── PANDA_Benchmark_Report.md  # Detailed markdown methodology report
+├── PANDA_Benchmark_Report.md  # Detailed markdown methodology & benchmark report
 ├── benchmark_results.csv      # Complete empirical metric log
 └── plots/                     # Cutoff distribution plots
 ```
@@ -102,13 +96,7 @@ Execute the complete multi-backbone benchmarking suite with early stopping:
 python main.py --backbones LIGHTGCN GCN GRAPHSAGE GAT --epochs 300 --patience 15
 ```
 
-### 3. Re-Synchronize LaTeX Report & PDF
-To update LaTeX tables, figures, and re-compile `Report/main.pdf` after running new experiments:
-```bash
-python Report/sync_report.py
-```
-
 ---
 
-## 📜 Academic Report
-A complete 7-page academic paper detailing the mathematical foundations, proofs, and analyses is available in [`Report/main.pdf`](Report/main.pdf) and can be re-compiled from [`Report/main.tex`](Report/main.tex).
+## 📜 Methodology & Documentation
+A comprehensive technical report detailing mathematical formulations, proofs, and in-depth empirical analyses is available in [`PANDA_Benchmark_Report.md`](PANDA_Benchmark_Report.md).

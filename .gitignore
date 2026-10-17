@@ -40,15 +40,8 @@ ENV/
 *.swp
 *.swo
 
-# LaTeX auxiliary files (keep .tex, .pdf, tables, and figures)
-Report/*.aux
-Report/*.log
-Report/*.out
-Report/*.toc
-Report/*.synctex.gz
-Report/*.fls
-Report/*.fdb_latexmk
-Report/texput.log
+# Private Local Academic Report (kept local for user, not published to GitHub)
+Report/
 
 # Scratch temporary scripts
 scratch/
