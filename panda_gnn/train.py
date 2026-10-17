@@ -23,7 +23,7 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     lambda_reg: float = 1e-4
     epochs: int = 300
-    patience: int = 15
+    patience: int = 50
     batch_size: int = 2048
     eval_frequency: int = 5
     seed: int = 42

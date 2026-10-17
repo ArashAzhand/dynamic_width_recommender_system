@@ -81,6 +81,7 @@ def run_single_experiment(
     config: TrainingConfig,
     device: torch.device,
     is_vanilla: bool = False,
+    precomputed_masks: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
 ) -> Dict[str, float]:
     """Runs a single training and evaluation cycle for given configuration.
 
@@ -93,6 +94,7 @@ def run_single_experiment(
         config: Training configuration.
         device: Torch compute device.
         is_vanilla: If True, disables PANDA routing (uniform dimension).
+        precomputed_masks: Optional precomputed (user_mask, item_mask).
 
     Returns:
         Dictionary of test metric scores.
@@ -100,10 +102,13 @@ def run_single_experiment(
     num_users = splits.num_users
     num_items = splits.num_items
 
-    if is_vanilla or selector is None:
+    if is_vanilla or (selector is None and precomputed_masks is None):
         # Uniform dimension baseline (all nodes allocated d_low, no routing)
         selection_masks = None
         eff_d_high = d_low
+    elif precomputed_masks is not None:
+        selection_masks = precomputed_masks
+        eff_d_high = d_high
     else:
         user_mask, item_mask = selector.select(
             splits.train_edge_index, num_users, num_items
@@ -143,6 +148,12 @@ def main() -> None:
         help="Random seeds for benchmark runs",
     )
     parser.add_argument(
+        "--num_folds",
+        type=int,
+        default=1,
+        help="Number of folds for K-fold cross-validation (e.g. 5 for 5-fold CV). If > 1, evaluates across folds.",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
         default="ML-100K",
@@ -155,14 +166,14 @@ def main() -> None:
         default=["LIGHTGCN", "GCN", "GRAPHSAGE", "GAT", "GIN"],
         help="GNN Backbones to evaluate",
     )
-    parser.add_argument("--epochs", type=int, default=300, help="Training epoch ceiling for early stopping")
-    parser.add_argument("--patience", type=int, default=15, help="Early stopping patience (eval checks, 5 epochs each)")
+    parser.add_argument("--epochs", type=int, default=400, help="Training epoch ceiling for early stopping")
+    parser.add_argument("--patience", type=int, default=50, help="Early stopping patience (eval checks, 5 epochs each, default 50 checks = 250 epochs)")
     parser.add_argument("--d_low", type=int, default=64, help="Base dimension")
     parser.add_argument("--d_high", type=int, default=128, help="Hub dimension")
     parser.add_argument("--k_percentile", type=float, default=0.10, help="Hub percentile")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--lambda_reg", type=float, default=1e-4, help="L2 regularization")
-    parser.add_argument("--fast_run", action="store_true", help="Quick sanity run (1 seed, 25 epochs)")
+    parser.add_argument("--fast_run", action="store_true", help="Quick sanity run (1 seed/fold, 25 epochs)")
     parser.add_argument("--output_csv", type=str, default="benchmark_results.csv", help="Output path")
     parser.add_argument("--plot_centrality", action="store_true", help="Generate centrality plots")
 
@@ -238,7 +249,9 @@ def main() -> None:
         (
             "PANDA-Betweenness",
             lambda s: BetweennessCentralitySelector(
-                k_percentile=args.k_percentile, seed=s, sample_k=300
+                k_percentile=args.k_percentile,
+                seed=s,
+                sample_k=50 if "1M" in args.dataset.upper() else 300,
             ),
             args.d_low,
             args.d_high,
@@ -246,8 +259,14 @@ def main() -> None:
         ),
     ]
 
-    total_runs = len(selected_backbones) * len(configs_to_test) * len(seeds)
+    if args.num_folds > 1:
+        splits_units = [("Fold", f) for f in range(args.num_folds)]
+    else:
+        splits_units = [("Seed", s) for s in seeds]
+
+    total_runs = len(selected_backbones) * len(configs_to_test) * len(splits_units)
     run_idx = 0
+    mask_cache: Dict[Tuple[str, str, int], Tuple[torch.Tensor, torch.Tensor]] = {}
 
     for backbone in selected_backbones:
         print(f"\n=======================================================")
@@ -257,11 +276,18 @@ def main() -> None:
         for config_name, selector_factory, d_l, d_h, is_vanilla in configs_to_test:
             model_key = f"{backbone.value} - {config_name}"
 
-            for seed in seeds:
+            for unit_type, unit_val in splits_units:
                 run_idx += 1
+                seed = seeds[0] if unit_type == "Fold" else unit_val
                 set_seed(seed)
                 loader = DatasetFactory.get_loader(args.dataset, seed=seed)
-                splits = loader.load_and_split()
+
+                if unit_type == "Fold":
+                    splits = loader.load_kfold_splits(num_folds=args.num_folds, fold_idx=unit_val)
+                    run_label = f"Fold {unit_val + 1}/{args.num_folds}"
+                else:
+                    splits = loader.load_and_split()
+                    run_label = f"Seed {unit_val}"
 
                 train_cfg = TrainingConfig(
                     learning_rate=args.lr,
@@ -272,22 +298,34 @@ def main() -> None:
                     seed=seed,
                 )
 
-                selector = selector_factory(seed) if selector_factory is not None else None
+                # Cache selection masks so PageRank / Betweenness are computed only once per fold/seed
+                cache_key = (config_name, unit_type, unit_val)
+                if cache_key in mask_cache:
+                    cached_masks = mask_cache[cache_key]
+                elif selector_factory is not None and not is_vanilla:
+                    selector = selector_factory(seed)
+                    cached_masks = selector.select(
+                        splits.train_edge_index, splits.num_users, splits.num_items
+                    )
+                    mask_cache[cache_key] = cached_masks
+                else:
+                    cached_masks = None
 
                 print(
-                    f"[{run_idx}/{total_runs}] Running {model_key} (Seed: {seed})...",
+                    f"[{run_idx}/{total_runs}] Running {model_key} ({run_label})...",
                     end="",
                     flush=True,
                 )
                 metrics, best_epoch, best_metric = run_single_experiment(
                     backbone=backbone,
                     splits=splits,
-                    selector=selector,
+                    selector=None,
                     d_low=d_l,
                     d_high=d_h,
                     config=train_cfg,
                     device=device,
                     is_vanilla=is_vanilla,
+                    precomputed_masks=cached_masks,
                 )
 
                 rec20 = metrics.get("Recall@20", 0.0)
@@ -322,7 +360,7 @@ def main() -> None:
 
     df_summary = pd.DataFrame(summary_rows)
     print("\n\n=======================================================")
-    print(" FINAL BENCHMARK RESULTS (Mean +/- Std across seeds)")
+    print(f" FINAL BENCHMARK RESULTS (Mean +/- Std across {splits_units[0][0].lower()}s)")
     print("=======================================================")
     print(df_summary.to_string(index=False))
 

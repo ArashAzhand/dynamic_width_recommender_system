@@ -88,15 +88,37 @@ In PANDA bipartite recommendation, low-width nodes ($v \in \mathcal{V}_L$) propa
    \end{cases}$$
    where each MLP contains two linear layers with LayerNorm and ReLU non-linearities.
 
-### 2.2. Embedding Zero-Masking & Dimensional Integrity
-To guarantee that low-degree nodes never exploit the expanded dimensionality ($d_H = 128$), an out-of-place mask operation zeros out trailing channels:
+### 2.2. Intuitive Mathematical Model of Centrality-Driven Width Adaptation
+To formalize the width adaptation mechanism simply and intuitively without heavy tensor calculus, we model node capacity allocation as an intuitive 4-step pipeline:
 
-$$\mathbf{X}_{\text{masked}} = \left[ \mathbf{X}_{:, :d_L} \,\Vert{}\, \mathbf{X}_{:, d_L:} \odot \mathbf{M} \right], \quad \mathbf{M} \in \{0, 1\}^{N \times 1}$$
+#### Step 1: Centrality Scoring
+Let $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ be the bipartite interaction graph where $\mathcal{V} = \mathcal{U} \cup \mathcal{I}$ and $N = |\mathcal{U}| + |\mathcal{I}|$. For every node $v \in \mathcal{V}$, we compute a scalar structural centrality score $c(v) \in \mathbb{R}_{\ge 0}$:
+* **Degree Centrality:** $c_{\text{deg}}(v) = |\mathcal{N}(v)|$, measuring the total volume of observed user-item interactions incident to node $v$.
+* **PageRank Centrality:** $c_{\text{pr}}(v) = (1 - \alpha)\frac{1}{N} + \alpha \sum_{u \in \mathcal{N}(v)} \frac{c_{\text{pr}}(u)}{|\mathcal{N}(u)|}$, capturing the stationary probability of visiting node $v$ during an infinite random walk with damping factor $\alpha = 0.85$.
+* **Betweenness Centrality:** $c_{\text{bet}}(v) = \sum_{s \ne v \ne t} \frac{\sigma_{st}(v)}{\sigma_{st}}$, quantifying the fraction of all shortest paths between arbitrary node pairs $(s, t)$ that pass through $v$, identifying critical topological bridges between user preference clusters.
 
-This mask is strictly enforced:
-1. On initial embedding table lookups ($\mathbf{X}^{(0)}$).
-2. After each graph convolution layer ($\mathbf{X}^{(l)}$).
-3. Following non-linear activation functions (ReLU / ELU).
+#### Step 2: Quantile Cutoff & Binary Bottleneck Indicator
+To respect the bipartite structure, users and items are thresholded independently. Given a hub fraction $k \in (0, 1)$ (we set $k=0.10$, representing the top $10\%$ most central nodes), we compute cutoff thresholds $\tau_U$ and $\tau_I$:
+$$\tau_U = \text{Quantile}\left(\{c(u)\}_{u \in \mathcal{U}}, 1 - k\right), \quad \tau_I = \text{Quantile}\left(\{c(i)\}_{i \in \mathcal{I}}, 1 - k\right)$$
+Every node $v \in \mathcal{V}$ is then assigned a binary bottleneck indicator $m(v) \in \{0, 1\}$:
+$$m(v) = \begin{cases}
+1 & \text{if } c(v) \ge \tau \quad \text{($v$ is a structural bottleneck / hub node)} \\
+0 & \text{if } c(v) < \tau \quad \text{($v$ is a long-tail / sparse node)}
+\end{cases}$$
+
+#### Step 3: Effective Dimension Mapping
+Using the binary indicator $m(v)$, the operational embedding dimensionality $d(v)$ assigned to node $v$ is modeled as a simple step function:
+$$d(v) = d_L + m(v) \cdot (d_H - d_L) = \begin{cases}
+d_H = 128 & \text{if } m(v) = 1 \\
+d_L = 64 & \text{if } m(v) = 0
+\end{cases}$$
+
+#### Step 4: Vectorized Dimension Masking
+To maintain constant memory tensor shapes on hardware accelerators, all node embeddings are stored in a unified $d_H$-dimensional matrix $\mathbf{H} \in \mathbb{R}^{N \times d_H}$. For each node $v$, we construct a binary dimension filter $\mathbf{w}(v) \in \{0, 1\}^{d_H}$:
+$$\mathbf{w}(v) = [\underbrace{1, 1, \dots, 1}_{d_L \text{ entries}}, \underbrace{m(v), m(v), \dots, m(v)}_{d_H - d_L \text{ entries}}]^\top$$
+The effective node feature vector $\mathbf{h}_v^{\text{effective}}$ is computed via the Hadamard (elementwise) product:
+$$\mathbf{h}_v^{\text{effective}} = \mathbf{h}_v \odot \mathbf{w}(v)$$
+When $m(v) = 0$, the trailing $d_H - d_L = 64$ dimensions are zeroed out, preventing low-degree nodes from exploiting extra parameter capacity and preventing overfitting.
 
 ### 2.3. Prediction Alignment Layer ($W_{\text{align}}$)
 After $L$ layers of message passing, node representations reside in heterogeneous dimensionalities ($d_L$ or $d_H$). To compute pairwise user-item inner products ($\hat{y}_{ui} = \mathbf{e}_u^\top \mathbf{e}_i$) without dimension mismatch, we introduce a learnable linear alignment projection:
@@ -128,43 +150,88 @@ The framework integrates the canonical recommender system datasets via an extens
 1. **MovieLens-100K:** 100,000 ratings from 943 users across 1,682 items. Evaluated across 2,517 active bipartite nodes.
 2. **MovieLens-1M:** 1,000,209 ratings from 6,039 users across 3,628 items. Downloaded, verified, and preprocessed for large-scale evaluation.
 
-### 3.2. Leakage-Proof Splitting & Hygiene
+### 3.2. Data Splitting & 5-Fold Cross-Validation
 * **Implicit Thresholding:** Ratings $\ge 3$ are converted into implicit positive feedback edges; ratings $< 3$ are dropped.
 * **Contiguous 0-Indexed Remapping:** Active users are re-indexed to $[0, |U|-1]$ and active items to $[0, |I|-1]$.
-* **Shifted Bipartite PyG Graph:** Item indices are shifted by $|U|$ such that nodes $0 \dots |U|-1$ are users and $|U| \dots |U|+|I|-1$ are items. Undirected bidirectional edges are added for homogeneous message passing:
+* **Shifted Bipartite PyG Graph:** Item indices are shifted by $|U|$ such that nodes $0 \dots |U|-1$ are users and $|U| \dots |U|+|I|-1$ are items:
   $$\mathcal{E} = \{(u, i + |U|) \mid (u, i) \in \mathcal{D}_{\text{train}}\} \cup \{(i + |U|, u) \mid (u, i) \in \mathcal{D}_{\text{train}}\}$$
-* **Per-User 80/10/10 Split:** For every individual user, positive interactions are partitioned into:
-  * **Train Set:** $80\%$ of interactions (used for training message passing and BPR loss).
-  * **Validation Set:** $10\%$ of interactions (used exclusively for early stopping ranking evaluation).
-  * **Test Set:** $10\%$ of interactions (used exclusively for final metric reporting).
-  * *Strict Isolation Rule:* Under no circumstances does validation or test data enter the adjacency matrix or message passing computation graph.
+* **5-Fold Cross-Validation Protocol:** For each user $u$, their observed positive items $\mathcal{I}_u$ are partitioned into 5 disjoint subsets $\mathcal{I}_u^{(0)}, \dots, \mathcal{I}_u^{(4)}$. In fold $k \in \{0, 1, 2, 3, 4\}$, $\mathcal{I}_u^{(k)}$ serves as the test set ($20\%$), a $10\%$ validation fraction is extracted from the remaining items for early stopping, and the remaining $70\%$ forms the training message-passing graph $\mathcal{E}_{\text{train}}$. This guarantees that every interaction is tested exactly once.
+* **Leakage-Proof Hygiene:** Under no circumstances do validation or test edges enter the message-passing adjacency matrix, strictly preventing transductive leakage.
 
-### 3.3. Hyperparameter Specification
+### 3.3. Hyperparameter Specification & Expanded Early Stopping
 
 | Hyperparameter | Symbol | Value | Rationale |
 | :--- | :--- | :--- | :--- |
 | **Base Dimension** | $d_L$ | $64$ | Standard collaborative filtering embedding width. |
 | **Hub Dimension** | $d_H$ | $128$ | $2\times$ expansion factor for graph bottlenecks. |
-| **Param-Matched Dimension** | $d_{\text{matched}}$ | $80$ | Exactly matches total PANDA parameter budget. |
+| **Param-Matched Dimension** | $d_{\text{matched}}$ | $80$ (100K) / $73$ (1M) | Matches total PANDA parameter budget. |
 | **Hub Percentile Cutoff** | $k$ | $0.10$ ($10\%$) | Targets the top 10% highest-centrality nodes. |
 | **Propagation Layers** | $L$ | $3$ | 3-hop neighborhood reception field. |
 | **Optimizer** | - | Adam | Standard first-order stochastic gradient descent. |
 | **Learning Rate** | $\eta$ | $1 \times 10^{-3}$ | Learning rate with adaptive moments. |
 | **Embedding $L_2$ Regularization** | $\lambda_{\text{reg}}$ | $1 \times 10^{-4}$ | Applied directly to 0-th layer initial embeddings. |
-| **Epoch Ceiling** | - | $300$ epochs | Sufficient budget to allow linear backbones (LightGCN) to converge. |
+| **Epoch Ceiling** | - | $400$ epochs | Ample ceiling allowing linear backbones (LightGCN) to reach full convergence. |
 | **Evaluation Frequency** | - | Every $5$ epochs | Validation evaluation cadence. |
-| **Early Stopping Patience** | - | $15$ eval checks ($75$ epochs) | Monitored on Validation Recall@20. Restores best state dict. |
+| **Early Stopping Patience** | - | $50$ eval checks ($250$ epochs) | Monitored on Validation Recall@20. Restores best state dict. |
 | **Negative Sampling** | - | Uniform | 1 negative item sampled per positive edge per epoch ($j \notin \mathcal{I}_u^{\text{train}}$). |
 | **Compute Device** | - | NVIDIA RTX 3060 CUDA GPU | Mixed precision single-precision float32. |
 
 ---
 
-## 4. Full-Catalogue Evaluation Protocol
+## 4. Comprehensive Evaluation Metrics: Mathematical Formulations & Comparative Dynamics
 
-Adhering strictly to established RecBole/DaisyRec benchmark guidelines:
-1. **Full-Catalogue Ranking:** For each test user $u$, affinity scores are computed across **all items in the catalogue** (1,574 items for ML-100K).
-2. **Seen Item Masking:** Items observed during training and validation are assigned $-\infty$ scores prior to top-$K$ selection.
-3. **Metrics Reported:** Recall@$K$, NDCG@$K$, Precision@$K$, HitRate@$K$, MAP@$K$, and MRR@$K$ ($K \in \{10, 20\}$).
+Full-catalogue recommendation computes predicted affinity scores $\hat{y}_{ui}$ across all unobserved candidate items in the catalogue. The top-$K$ items with highest scores form the recommendation list $\text{Top}_K(u) = [i_1, i_2, \dots, i_K]$. Let $\mathcal{I}_u^{\text{test}}$ denote the ground-truth set of test items for user $u$.
+
+### 4.1. Mathematical Formulations
+
+1. **Recall@K (Coverage / Completeness):**
+   $$\text{Recall}@K(u) = \frac{|\text{Top}_K(u) \cap \mathcal{I}_u^{\text{test}}|}{|\mathcal{I}_u^{\text{test}}|}, \quad \text{Recall}@K = \frac{1}{|\mathcal{U}_{\text{test}}|} \sum_{u \in \mathcal{U}_{\text{test}}} \text{Recall}@K(u)$$
+   Measures the percentage of items the user liked that were successfully retrieved in the top-$K$ list.
+
+2. **Precision@K (Recommendation Quality Density):**
+   $$\text{Precision}@K(u) = \frac{|\text{Top}_K(u) \cap \mathcal{I}_u^{\text{test}}|}{K}, \quad \text{Precision}@K = \frac{1}{|\mathcal{U}_{\text{test}}|} \sum_{u \in \mathcal{U}_{\text{test}}} \text{Precision}@K(u)$$
+   Measures the fraction of recommended slots in the top-$K$ list that are relevant.
+
+3. **Normalized Discounted Cumulative Gain (NDCG@K - Positional Utility):**
+   $$\text{DCG}@K(u) = \sum_{r=1}^K \frac{\mathbb{I}(i_r \in \mathcal{I}_u^{\text{test}})}{\log_2(r + 1)}, \quad \text{IDCG}@K(u) = \sum_{r=1}^{\min(K, |\mathcal{I}_u^{\text{test}}|)} \frac{1}{\log_2(r + 1)}$$
+   $$\text{NDCG}@K(u) = \frac{\text{DCG}@K(u)}{\text{IDCG}@K(u)}, \quad \text{NDCG}@K = \frac{1}{|\mathcal{U}_{\text{test}}|} \sum_{u \in \mathcal{U}_{\text{test}}} \text{NDCG}@K(u)$$
+   Weights hits logarithmically by rank: a hit at rank 1 earns $1.000$, rank 2 earns $0.631$, and rank 20 earns $0.228$.
+
+4. **Mean Reciprocal Rank (MRR@K - First Hit Responsiveness):**
+   $$\text{MRR}@K(u) = \begin{cases} \frac{1}{\text{rank}^*(u)} & \text{if } \exists i_r \in \text{Top}_K(u) \cap \mathcal{I}_u^{\text{test}} \text{ with } \text{rank}^*(u) = \min \{r \le K \mid i_r \in \mathcal{I}_u^{\text{test}}\} \\ 0 & \text{if none} \end{cases}$$
+   Measures the reciprocal rank of the *very first* relevant item.
+
+5. **Mean Average Precision (MAP@K - Precision-Recall AUC):**
+   $$\text{AP}@K(u) = \frac{1}{\min(K, |\mathcal{I}_u^{\text{test}}|)} \sum_{r=1}^K \text{Precision}@r(u) \cdot \mathbb{I}(i_r \in \mathcal{I}_u^{\text{test}}), \quad \text{MAP}@K = \frac{1}{|\mathcal{U}_{\text{test}}|} \sum_{u \in \mathcal{U}_{\text{test}}} \text{AP}@K(u)$$
+   Computes the average precision evaluated at each position where a relevant item is encountered.
+
+6. **Hit Rate (HitRate@K):**
+   $$\text{HitRate}@K(u) = \mathbb{I}\left(|\text{Top}_K(u) \cap \mathcal{I}_u^{\text{test}}| > 0\right)$$
+   Binary indicator showing whether at least one recommended item was relevant.
+
+### 4.2. In-Depth Comparative Dynamics: What is the Difference?
+
+* **Recall@10 vs. Recall@20 (The Horizon Effect):**
+  * **Mathematical Relationship:** Because $\text{Top}_{10}(u) \subseteq \text{Top}_{20}(u)$, Recall is monotonically non-decreasing: $\text{Recall}@20 \ge \text{Recall}@10$ strictly holds for every user.
+  * **Practical Meaning:** Recall@10 measures **immediate above-the-fold visibility** (items shown on a mobile screen without scrolling). In contrast, Recall@20 measures **candidate generation depth** (the standard benchmark setting in LightGCN and NeuMF).
+  * **Concrete Example:** If a model places a relevant movie at rank 14:
+    * It contributes **0.00** to Recall@10.
+    * It contributes **full credit** ($1/|\mathcal{I}_u^{\text{test}}|$) to Recall@20.
+  * The ratio $\frac{\text{Recall}@20}{\text{Recall}@10}$ reveals how effectively the model ranks relevant items just beyond the top-10 boundary.
+
+* **Recall vs. Precision (Coverage vs. Purity):**
+  * Recall measures *coverage* (how many of the user's liked items were found, normalized by $|\mathcal{I}_u^{\text{test}}|$).
+  * Precision measures *purity* (how many of the $K$ recommended slots were useful, normalized by $K$).
+  * As $K$ grows from 10 to 20, Recall increases while Precision declines, reflecting the fundamental information retrieval trade-off between coverage and noise density.
+
+* **Recall vs. NDCG (Binary Matching vs. Positional Utility):**
+  * Recall is position-insensitive within the top-$K$: a hit at rank 1 produces the exact same Recall gain as a hit at rank 20.
+  * In human-facing interfaces, top positions receive exponentially higher attention and clicks. NDCG penalizes hits deeper down using $\frac{1}{\log_2(r+1)}$: rank 1 earns $1.000$, whereas rank 20 earns only $0.228$ ($77.2\%$ penalty).
+
+* **NDCG vs. MRR (Catalogue Discovery vs. First-Hit Urgency):**
+  * NDCG evaluates the ranking of *all* relevant items in the list.
+  * MRR is indifferent to additional hits once the first hit is registered.
+  * In multi-item discovery platforms (e.g., Netflix, Spotify), NDCG is the primary metric. In conversational voice assistants or zero-click search (where a single correct item fulfills the request), MRR is paramount.
 
 ---
 
