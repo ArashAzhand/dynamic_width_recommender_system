@@ -10,6 +10,7 @@ from panda_gnn.conv_layers import (
     BasePANDAConv,
     PANDAGATConv,
     PANDAGCNConv,
+    PANDAGINConv,
     PANDALightGCNConv,
     PANDASAGEConv,
     apply_mask,
@@ -23,6 +24,7 @@ class BackboneType(str, Enum):
     GCN = "GCN"
     GRAPHSAGE = "GRAPHSAGE"
     GAT = "GAT"
+    GIN = "GIN"
 
 
 class ConvKernelFactory:
@@ -44,6 +46,8 @@ class ConvKernelFactory:
             return PANDASAGEConv(d_low=d_low, d_high=d_high)
         elif backbone_type == BackboneType.GAT:
             return PANDAGATConv(d_low=d_low, d_high=d_high, heads=gat_heads)
+        elif backbone_type == BackboneType.GIN:
+            return PANDAGINConv(d_low=d_low, d_high=d_high)
         else:
             raise ValueError(f"Unknown backbone type: {backbone_type}")
 

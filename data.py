@@ -1,5 +1,19 @@
 """Data Pipeline and Hygiene Module (Root Interface)."""
 
-from panda_gnn.data import DatasetSplits, MovieLens100KLoader
+from panda_gnn.data import (
+    BaseDatasetLoader,
+    DatasetFactory,
+    DatasetSplits,
+    DatasetType,
+    MovieLens100KLoader,
+    MovieLens1MLoader,
+)
 
-__all__ = ["DatasetSplits", "MovieLens100KLoader"]
+__all__ = [
+    "BaseDatasetLoader",
+    "DatasetFactory",
+    "DatasetSplits",
+    "DatasetType",
+    "MovieLens100KLoader",
+    "MovieLens1MLoader",
+]

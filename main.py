@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from panda_gnn.data import DatasetSplits, MovieLens100KLoader
+from panda_gnn.data import DatasetFactory, DatasetSplits, MovieLens100KLoader
 from panda_gnn.models import BackboneType, PANDARecommender
 from panda_gnn.selectors import (
     BetweennessCentralitySelector,
@@ -143,10 +143,16 @@ def main() -> None:
         help="Random seeds for benchmark runs",
     )
     parser.add_argument(
+        "--dataset",
+        type=str,
+        default="ML-100K",
+        help="Benchmark dataset: ML-100K or ML-1M",
+    )
+    parser.add_argument(
         "--backbones",
         type=str,
         nargs="+",
-        default=["LIGHTGCN", "GCN", "GRAPHSAGE", "GAT"],
+        default=["LIGHTGCN", "GCN", "GRAPHSAGE", "GAT", "GIN"],
         help="GNN Backbones to evaluate",
     )
     parser.add_argument("--epochs", type=int, default=300, help="Training epoch ceiling for early stopping")
@@ -172,7 +178,7 @@ def main() -> None:
     selected_backbones = [BackboneType(b.upper()) for b in args.backbones]
 
     # Pre-load data once for profiling
-    data_loader = MovieLens100KLoader(seed=seeds[0])
+    data_loader = DatasetFactory.get_loader(args.dataset, seed=seeds[0])
     sample_splits = data_loader.load_and_split()
     num_users = sample_splits.num_users
     num_items = sample_splits.num_items
@@ -254,7 +260,7 @@ def main() -> None:
             for seed in seeds:
                 run_idx += 1
                 set_seed(seed)
-                loader = MovieLens100KLoader(seed=seed)
+                loader = DatasetFactory.get_loader(args.dataset, seed=seed)
                 splits = loader.load_and_split()
 
                 train_cfg = TrainingConfig(

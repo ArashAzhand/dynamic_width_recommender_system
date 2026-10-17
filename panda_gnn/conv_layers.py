@@ -313,3 +313,84 @@ class PANDAGATConv(BasePANDAConv):
         mean_alpha = alpha.mean(dim=1, keepdim=True)
 
         return mean_alpha * msg
+
+
+class PANDAGINConv(BasePANDAConv):
+    """PANDA GIN Convolution: Sum aggregation + Learnable epsilon + Width-specific MLPs."""
+
+    def __init__(
+        self,
+        d_low: int,
+        d_high: int,
+        eps: float = 0.0,
+        train_eps: bool = True,
+    ) -> None:
+        """Initializes PANDAGINConv with sum aggregation and dual-width MLPs."""
+        super().__init__(d_low=d_low, d_high=d_high, aggr="add")
+        self.initial_eps = eps
+        if train_eps:
+            self.eps = nn.Parameter(torch.tensor([eps]))
+        else:
+            self.register_buffer("eps", torch.tensor([eps]))
+
+        # Dual 2-layer MLPs for low and high dimensionalities with LayerNorm and ReLU
+        self.mlp_low = nn.Sequential(
+            nn.Linear(d_low, d_low),
+            nn.LayerNorm(d_low),
+            nn.ReLU(),
+            nn.Linear(d_low, d_low),
+        )
+
+        self.mlp_high = nn.Sequential(
+            nn.Linear(d_high, d_high),
+            nn.LayerNorm(d_high),
+            nn.ReLU(),
+            nn.Linear(d_high, d_high),
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        is_high: torch.Tensor,
+    ) -> torch.Tensor:
+        """Aggregates neighbor representations with sum, applies (1+eps)*x, and transforms via MLP."""
+        neigh_out = self.propagate(
+            edge_index,
+            x=x,
+            is_high=is_high,
+        )
+
+        out = torch.empty_like(x)
+        low_mask = ~is_high
+
+        if low_mask.any():
+            root_low = x[low_mask, : self.d_low]
+            neigh_low = neigh_out[low_mask, : self.d_low]
+            comb_low = (1.0 + self.eps) * root_low + neigh_low
+            updated_low = self.mlp_low(comb_low)
+            zeros = torch.zeros(
+                updated_low.size(0),
+                self.d_high - self.d_low,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            out[low_mask] = torch.cat([updated_low, zeros], dim=-1)
+
+        if is_high.any():
+            root_high = x[is_high]
+            neigh_high = neigh_out[is_high]
+            comb_high = (1.0 + self.eps) * root_high + neigh_high
+            out[is_high] = self.mlp_high(comb_high)
+
+        return apply_mask(out, is_high, self.d_low)
+
+    def message(
+        self,
+        x_j: torch.Tensor,
+        is_high_i: torch.Tensor,
+        is_high_j: torch.Tensor,
+    ) -> torch.Tensor:
+        """Routes message between source and target nodes."""
+        return self.route_messages(x_j, is_high_i, is_high_j)
+

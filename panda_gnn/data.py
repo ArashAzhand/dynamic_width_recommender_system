@@ -1,8 +1,13 @@
 """Data Pipeline and Hygiene Module for Bipartite Collaborative Filtering."""
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 import os
+import ssl
 from typing import Dict, Optional, Set, Tuple
+import urllib.request
+import zipfile
 
 import numpy as np
 import pandas as pd
@@ -25,74 +30,56 @@ class DatasetSplits:
     user_test_dict: Dict[int, Set[int]]
 
 
-class MovieLens100KLoader:
-    """Data ingestion and preprocessing pipeline for MovieLens-100K."""
+class DatasetType(str, Enum):
+    """Supported benchmark recommendation datasets."""
 
-    DATA_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
+    ML_100K = "ML-100K"
+    ML_1M = "ML-1M"
+
+
+class BaseDatasetLoader(ABC):
+    """Abstract base class for recommendation dataset ingestion and leak-proof splitting."""
 
     def __init__(
         self,
-        data_dir: str = "Data/ml-100k",
+        data_dir: str,
         implicit_threshold: int = 3,
         seed: int = 42,
     ) -> None:
-        """Initializes data loader parameters."""
+        """Initializes loader parameters."""
         self.data_dir = data_dir
         self.implicit_threshold = implicit_threshold
         self.seed = seed
 
-    def _ensure_downloaded(self) -> str:
-        """Ensures MovieLens 100K dataset is downloaded and extracted."""
-        data_file = os.path.join(self.data_dir, "u.data")
-        if os.path.exists(data_file):
-            return data_file
-
-        import urllib.request
-        import zipfile
-
-        os.makedirs(self.data_dir, exist_ok=True)
-        zip_path = os.path.join(self.data_dir, "ml-100k.zip")
-        print(f"Downloading MovieLens-100K dataset from {self.DATA_URL}...")
-        urllib.request.urlretrieve(self.DATA_URL, zip_path)
-
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(os.path.dirname(self.data_dir))
-
-        if not os.path.exists(data_file):
-            extracted_nested = os.path.join(os.path.dirname(self.data_dir), "ml-100k", "u.data")
-            if os.path.exists(extracted_nested):
-                data_file = extracted_nested
-
-        return data_file
-
+    @abstractmethod
     def load_and_split(
         self,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
     ) -> DatasetSplits:
-        """Loads dataset, converts to implicit positive edges, re-indexes, and splits."""
+        """Abstract method loading data and returning partitioned splits."""
+        pass
+
+    def _create_splits_from_df(
+        self,
+        positive_df: pd.DataFrame,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+    ) -> DatasetSplits:
+        """Contiguously maps IDs, creates leak-proof per-user 80/10/10 splits, and constructs shifted edges."""
         if not np.isclose(train_ratio + val_ratio + test_ratio, 1.0):
             raise ValueError("Splits must sum to 1.0")
 
-        file_path = self._ensure_downloaded()
-        df = pd.read_csv(
-            file_path,
-            sep="\t",
-            names=["user_id", "item_id", "rating", "timestamp"],
-            engine="python",
-        )
-
-        # 1. Implicit feedback thresholding
-        positive_df = df[df["rating"] >= self.implicit_threshold].copy()
-
-        # 2. Contiguous 0-indexed ID mapping
+        # 1. Contiguous 0-indexed ID mapping
         unique_users = sorted(positive_df["user_id"].unique())
         unique_items = sorted(positive_df["item_id"].unique())
 
         user2id = {orig: idx for idx, orig in enumerate(unique_users)}
         item2id = {orig: idx for idx, orig in enumerate(unique_items)}
 
+        positive_df = positive_df.copy()
         positive_df["u_idx"] = positive_df["user_id"].map(user2id)
         positive_df["i_idx"] = positive_df["item_id"].map(item2id)
 
@@ -163,6 +150,7 @@ class MovieLens100KLoader:
         test_i = torch.tensor([r[1] for r in test_records], dtype=torch.long)
         test_user_item_edges = torch.stack([test_u, test_i], dim=0)
 
+        # Shift item IDs by num_users for homogeneous message passing
         shifted_items = train_i + num_users
         u_to_i = torch.stack([train_u, shifted_items], dim=0)
         i_to_u = torch.stack([shifted_items, train_u], dim=0)
@@ -180,3 +168,143 @@ class MovieLens100KLoader:
             user_val_dict=user_val_dict,
             user_test_dict=user_test_dict,
         )
+
+
+class MovieLens100KLoader(BaseDatasetLoader):
+    """Data ingestion and preprocessing pipeline for MovieLens-100K."""
+
+    DATA_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
+
+    def __init__(
+        self,
+        data_dir: str = "Data/ml-100k",
+        implicit_threshold: int = 3,
+        seed: int = 42,
+    ) -> None:
+        """Initializes loader."""
+        super().__init__(data_dir=data_dir, implicit_threshold=implicit_threshold, seed=seed)
+
+    def _ensure_downloaded(self) -> str:
+        """Ensures MovieLens 100K dataset is downloaded and extracted."""
+        data_file = os.path.join(self.data_dir, "u.data")
+        if os.path.exists(data_file):
+            return data_file
+
+        os.makedirs(self.data_dir, exist_ok=True)
+        zip_path = os.path.join(self.data_dir, "ml-100k.zip")
+        print(f"Downloading MovieLens-100K dataset from {self.DATA_URL}...")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with urllib.request.urlopen(self.DATA_URL, context=ctx) as resp, open(zip_path, "wb") as f:
+            f.write(resp.read())
+
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(os.path.dirname(self.data_dir))
+
+        if not os.path.exists(data_file):
+            nested = os.path.join(os.path.dirname(self.data_dir), "ml-100k", "u.data")
+            if os.path.exists(nested):
+                data_file = nested
+
+        return data_file
+
+    def load_and_split(
+        self,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+    ) -> DatasetSplits:
+        """Loads MovieLens-100K, filters by threshold, and generates splits."""
+        file_path = self._ensure_downloaded()
+        df = pd.read_csv(
+            file_path,
+            sep="\t",
+            names=["user_id", "item_id", "rating", "timestamp"],
+            engine="python",
+        )
+        positive_df = df[df["rating"] >= self.implicit_threshold].copy()
+        return self._create_splits_from_df(positive_df, train_ratio, val_ratio, test_ratio)
+
+
+class MovieLens1MLoader(BaseDatasetLoader):
+    """Data ingestion and preprocessing pipeline for MovieLens-1M."""
+
+    DATA_URL = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
+
+    def __init__(
+        self,
+        data_dir: str = "Data/ml-1m",
+        implicit_threshold: int = 3,
+        seed: int = 42,
+    ) -> None:
+        """Initializes loader."""
+        super().__init__(data_dir=data_dir, implicit_threshold=implicit_threshold, seed=seed)
+
+    def _ensure_downloaded(self) -> str:
+        """Ensures MovieLens 1M dataset is downloaded and extracted."""
+        data_file = os.path.join(self.data_dir, "ratings.dat")
+        if os.path.exists(data_file):
+            return data_file
+
+        os.makedirs(self.data_dir, exist_ok=True)
+        zip_path = os.path.join(self.data_dir, "ml-1m.zip")
+        print(f"Downloading MovieLens-1M dataset from {self.DATA_URL}...")
+
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with urllib.request.urlopen(self.DATA_URL, context=ctx) as resp, open(zip_path, "wb") as f:
+            f.write(resp.read())
+
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(os.path.dirname(self.data_dir))
+
+        if not os.path.exists(data_file):
+            nested = os.path.join(os.path.dirname(self.data_dir), "ml-1m", "ratings.dat")
+            if os.path.exists(nested):
+                data_file = nested
+
+        return data_file
+
+    def load_and_split(
+        self,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        test_ratio: float = 0.1,
+    ) -> DatasetSplits:
+        """Loads MovieLens-1M, filters by threshold, and generates splits."""
+        file_path = self._ensure_downloaded()
+        df = pd.read_csv(
+            file_path,
+            sep="::",
+            names=["user_id", "item_id", "rating", "timestamp"],
+            engine="python",
+        )
+        positive_df = df[df["rating"] >= self.implicit_threshold].copy()
+        return self._create_splits_from_df(positive_df, train_ratio, val_ratio, test_ratio)
+
+
+class DatasetFactory:
+    """Factory creating appropriate dataset loader instance."""
+
+    @staticmethod
+    def get_loader(
+        dataset_name: str,
+        data_dir: Optional[str] = None,
+        implicit_threshold: int = 3,
+        seed: int = 42,
+    ) -> BaseDatasetLoader:
+        """Instantiates dataset loader by name."""
+        name_clean = dataset_name.strip().upper().replace("_", "-")
+        if name_clean in ("ML-100K", "MOVIELENS-100K", "100K"):
+            target_dir = data_dir or "Data/ml-100k"
+            return MovieLens100KLoader(data_dir=target_dir, implicit_threshold=implicit_threshold, seed=seed)
+        elif name_clean in ("ML-1M", "MOVIELENS-1M", "1M"):
+            target_dir = data_dir or "Data/ml-1m"
+            return MovieLens1MLoader(data_dir=target_dir, implicit_threshold=implicit_threshold, seed=seed)
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset_name}. Supported: ML-100K, ML-1M")

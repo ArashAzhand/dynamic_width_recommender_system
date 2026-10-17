@@ -46,6 +46,10 @@ Report/
 # Scratch temporary scripts
 scratch/
 
+# Large dataset archives and raw files
+*.zip
+Data/ml-1m/
+
 # OS specific
 .DS_Store
 Thumbs.db
