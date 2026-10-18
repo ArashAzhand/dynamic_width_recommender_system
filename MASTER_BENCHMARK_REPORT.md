@@ -277,16 +277,19 @@ Evaluated across **all 30 configurations** (5 GNN Backbones $\times$ 6 Capacity 
 ---
 
 ### 7.2. MovieLens-1M Master Results Table
-Evaluated on the full **1,000,209 ratings graph** (6,039 users, 3,628 items, 1,338,340 bidirectional bipartite edges) under cross-validation with extended early stopping:
+Evaluated on the full **1,000,209 ratings graph** (6,039 users, 3,628 items, 1,338,340 bidirectional bipartite edges) under early stopping:
 
 | Backbone | Model Configuration | Recall@10 | Recall@20 | NDCG@10 | NDCG@20 | MAP@20 | MRR@20 | Best Epoch |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **LightGCN** | Vanilla ($d=64$) | 0.0615 $\pm$ 0.0002 | 0.1070 $\pm$ 0.0002 | 0.3234 $\pm$ 0.0010 | 0.3032 $\pm$ 0.0011 | 0.1687 $\pm$ 0.0005 | 0.5374 $\pm$ 0.0064 | 20.0 $\pm$ 5.0 |
-| | Param-Matched ($d=80$) | 0.0594 $\pm$ 0.0002 | 0.1056 $\pm$ 0.0002 | 0.3151 $\pm$ 0.0017 | 0.2987 $\pm$ 0.0015 | 0.1650 $\pm$ 0.0006 | 0.5241 $\pm$ 0.0079 | 10.0 $\pm$ 0.0 |
+| | Param-Matched ($d=73$) | 0.0764 | 0.1247 | 0.1189 | 0.1232 | 0.0500 | 0.2517 | 40.0 |
 | | PANDA-Random (Ablation) | 0.0590 $\pm$ 0.0004 | 0.1029 $\pm$ 0.0003 | 0.3109 $\pm$ 0.0028 | 0.2913 $\pm$ 0.0016 | 0.1582 $\pm$ 0.0011 | 0.5211 $\pm$ 0.0085 | 10.0 $\pm$ 0.0 |
 | | **PANDA-Degree** | 0.0613 $\pm$ 0.0005 | **0.1075 $\pm$ 0.0001** | **0.3236 $\pm$ 0.0020** | **0.3047 $\pm$ 0.0017** | **0.1704 $\pm$ 0.0010** | **0.5374 $\pm$ 0.0066** | 22.5 $\pm$ 2.5 |
 | | **PANDA-PageRank** | 0.0615 $\pm$ 0.0005 | 0.1072 $\pm$ 0.0001 | **0.3236 $\pm$ 0.0023** | 0.3042 $\pm$ 0.0018 | 0.1700 $\pm$ 0.0011 | 0.5372 $\pm$ 0.0067 | 20.0 $\pm$ 0.0 |
 | | **PANDA-Betweenness** | **0.0617 $\pm$ 0.0005** | 0.1065 $\pm$ 0.0007 | 0.3228 $\pm$ 0.0031 | 0.3032 $\pm$ 0.0025 | 0.1692 $\pm$ 0.0016 | 0.5362 $\pm$ 0.0081 | 17.5 $\pm$ 2.5 |
+| **GCN** | Vanilla ($d=64$) | 0.0752 | 0.1254 | 0.1201 | **0.1250** | 0.0512 | 0.2534 | 160.0 |
+| | Param-Matched ($d=73$) | 0.0756 | 0.1253 | 0.1201 | 0.1249 | 0.0511 | 0.2527 | 165.0 |
+| | **PANDA-Random** | 0.0739 | **0.1258** | 0.1186 | 0.1246 | 0.0507 | 0.2529 | 120.0 |
 
 ---
 
